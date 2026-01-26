@@ -666,7 +666,6 @@ if (!CONFIG.MINO_API_KEY) {
 }
 
 // Initialize database then start bot
-const db = require('./database');
 db.initDb().then(() => {
   console.log('💾 Database initialized');
   client.login(CONFIG.DISCORD_TOKEN);
