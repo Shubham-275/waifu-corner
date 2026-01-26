@@ -153,6 +153,50 @@ function isDeal(item) {
 }
 
 // =====================================
+// 🔍 SMART PARSER - Find items in any response format
+// =====================================
+function findItemsArray(obj) {
+  if (!obj) return null;
+  
+  // If it's a string, try to parse as JSON
+  if (typeof obj === 'string') {
+    try {
+      obj = JSON.parse(obj.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
+    } catch (e) {
+      return null;
+    }
+  }
+  
+  // If it's already an array of objects with url/price, return it
+  if (Array.isArray(obj) && obj.length > 0 && typeof obj[0] === 'object' && (obj[0].url || obj[0].price)) {
+    return obj;
+  }
+  
+  // Search through all properties for an array of items
+  if (typeof obj === 'object') {
+    for (const key of Object.keys(obj)) {
+      const value = obj[key];
+      
+      // Check if this property is an array of objects with url or price
+      if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object') {
+        if (value[0].url || value[0].price || value[0].name || value[0].raw_title) {
+          console.log(`Found items in field: "${key}" (${value.length} items)`);
+          return value;
+        }
+      }
+      
+      // Recursively check nested objects (but not arrays)
+      if (typeof value === 'object' && !Array.isArray(value)) {
+        const nested = findItemsArray(value);
+        if (nested) return nested;
+      }
+    }
+  }
+  
+  return null;
+}
+
+// =====================================
 // 🔍 MINO API - AmiAmi Search
 // =====================================
 async function searchAmiAmi(query, maxPrice = null) {
@@ -219,21 +263,11 @@ Return JSON array like:
           if (event.type === 'COMPLETE') {
             console.log('Mino COMPLETE event received');
             
-            // Try different fields where results might be
-            let items = event.result || event.items || event.resultJson || event.output || event.data;
+            // Smart parser: find any array of objects with url/price fields
+            let items = findItemsArray(event);
             
-            if (typeof items === 'string') {
-              items = items.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-              try {
-                items = JSON.parse(items);
-              } catch (e) {
-                console.error('Failed to parse items string:', e.message);
-              }
-            }
-            
-            // Handle nested items/result
-            if (items && typeof items === 'object') {
-              foundItems = Array.isArray(items) ? items : (items.items || items.result || []);
+            if (items && items.length > 0) {
+              foundItems = items;
             }
           }
           
@@ -280,11 +314,24 @@ Return JSON array like:
     // Fallback: try parsing entire response as JSON
     try {
       const fullJson = JSON.parse(text);
-      const items = fullJson.items || fullJson.result || (Array.isArray(fullJson) ? fullJson : null);
+      const items = findItemsArray(fullJson);
       
       if (items && items.length > 0) {
-        console.log(`✅ Mino found ${items.length} items (fallback JSON)`);
-        return { success: true, items };
+        // Apply same post-processing
+        const processedItems = items.map(item => {
+          const title = item.raw_title || item.full_title || item.name || '';
+          const gradeMatch = title.match(/ITEM:\s*([A-C][+-]?)\s*[\/\s]*BOX:\s*([A-C][+-]?)/i);
+          
+          if (gradeMatch) {
+            item.item_grade = gradeMatch[1].toUpperCase();
+            item.box_grade = gradeMatch[2].toUpperCase();
+            item.name = title.replace(/^\(Pre-owned\s+ITEM:[A-C][+-]?\s*[\/\s]*BOX:[A-C][+-]?\)\s*/i, '').trim() || item.name;
+          }
+          return item;
+        });
+        
+        console.log(`✅ Mino found ${processedItems.length} items (fallback)`);
+        return { success: true, items: processedItems };
       }
     } catch (e) {
       // Not valid JSON
