@@ -199,20 +199,26 @@ Return as JSON array.${maxPrice ? ` Only items under ${maxPrice} JPY.` : ''}`;
     const text = await response.text();
     const lines = text.split('\n');
     
+    console.log('Mino raw response preview:', text.slice(0, 500));
+    
     for (const line of lines) {
       if (line.startsWith('data: ')) {
         try {
           const event = JSON.parse(line.slice(6));
           
-          if (event.type === 'COMPLETE' && event.status === 'COMPLETED') {
-            let items = event.resultJson || event.output;
+          // Handle different response formats
+          if (event.type === 'COMPLETE' || event.status === 'COMPLETED' || event.result) {
+            let items = event.result || event.resultJson || event.output;
             
             if (typeof items === 'string') {
               items = items.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
               items = JSON.parse(items);
             }
             
-            return { success: true, items: Array.isArray(items) ? items : items?.items || [] };
+            if (items && (Array.isArray(items) || items.length > 0)) {
+              console.log(`Mino found ${Array.isArray(items) ? items.length : 'some'} items`);
+              return { success: true, items: Array.isArray(items) ? items : items?.items || [] };
+            }
           }
           
           if (event.type === 'ERROR' || event.status === 'FAILED') {
@@ -223,6 +229,17 @@ Return as JSON array.${maxPrice ? ` Only items under ${maxPrice} JPY.` : ''}`;
           // Continue parsing other lines
         }
       }
+    }
+    
+    // Try parsing entire response as JSON (non-SSE format)
+    try {
+      const fullJson = JSON.parse(text);
+      if (fullJson.result) {
+        console.log(`Mino found ${fullJson.result.length} items (direct JSON)`);
+        return { success: true, items: fullJson.result };
+      }
+    } catch (e) {
+      // Not valid JSON
     }
     
     return { success: false, error: 'No valid response from Mino' };
