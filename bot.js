@@ -18,7 +18,7 @@ const db = require('./database');
 const CONFIG = {
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
   MINO_API_KEY: process.env.MINO_API_KEY,
-  MINO_ENDPOINT: 'https://mino.ai/api/automation/run',
+  MINO_ENDPOINT: 'https://mino.ai/v1/automation/run-sse',
   WATCH_INTERVAL: 5 * 60 * 1000, // 5 minutes
   RATE_LIMIT_WINDOW: 60000,      // 1 minute
   RATE_LIMIT_MAX: 10,            // 10 searches per minute
@@ -158,7 +158,7 @@ function isDeal(item) {
 async function searchAmiAmi(query, maxPrice = null) {
   const searchUrl = `https://www.amiami.com/eng/search/list/?s_keywords=${encodeURIComponent(query)}&s_st_condition_flg=1`;
   
-  const prompt = `You are on AmiAmi's pre-owned figures search page.
+  const goal = `You are on AmiAmi's pre-owned figures search page.
 For each figure listing visible (max 8), extract:
 - name: Full product name
 - price: Price in JPY (just the number)
@@ -173,18 +173,17 @@ Return as JSON array.${maxPrice ? ` Only items under ${maxPrice} JPY.` : ''}`;
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000);
+    const timeout = setTimeout(() => controller.abort(), 90000);
     
     const response = await fetch(CONFIG.MINO_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${CONFIG.MINO_API_KEY}`,
+        'X-API-Key': CONFIG.MINO_API_KEY,
       },
       body: JSON.stringify({ 
         url: searchUrl, 
-        prompt,
-        outputType: 'json'
+        goal,
       }),
       signal: controller.signal,
     });
@@ -196,18 +195,37 @@ Return as JSON array.${maxPrice ? ` Only items under ${maxPrice} JPY.` : ''}`;
       return { success: false, error: `API error: ${response.status}` };
     }
 
-    const data = await response.json();
+    // Parse SSE response
+    const text = await response.text();
+    const lines = text.split('\n');
     
-    if (data.result) {
-      let items = data.result;
-      if (typeof items === 'string') {
-        items = items.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        items = JSON.parse(items);
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try {
+          const event = JSON.parse(line.slice(6));
+          
+          if (event.type === 'COMPLETE' && event.status === 'COMPLETED') {
+            let items = event.resultJson || event.output;
+            
+            if (typeof items === 'string') {
+              items = items.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+              items = JSON.parse(items);
+            }
+            
+            return { success: true, items: Array.isArray(items) ? items : items?.items || [] };
+          }
+          
+          if (event.type === 'ERROR' || event.status === 'FAILED') {
+            console.error('Mino error:', event.error || event.message);
+            return { success: false, error: event.error || event.message };
+          }
+        } catch (e) {
+          // Continue parsing other lines
+        }
       }
-      return { success: true, items: Array.isArray(items) ? items : items.items || [] };
     }
     
-    return { success: false, error: 'No results in response' };
+    return { success: false, error: 'No valid response from Mino' };
   } catch (error) {
     console.error('Search error:', error.message);
     return { success: false, error: error.message };
