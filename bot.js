@@ -346,8 +346,7 @@ function parseMessage(content) {
 // =====================================
 // 🤖 MESSAGE HANDLERS
 // =====================================
-async function handleMessage(message) {
-  const content = message.content;
+async function handleMessage(message, content) {
   const username = message.author.username;
   const discordId = message.author.id;
   
@@ -641,9 +640,10 @@ client.on('messageCreate', async (message) => {
   console.log(`📨 Message from ${message.author.username}: "${message.content.slice(0, 50)}" (DM: ${isDM})`);
   
   if (isDM || isMentioned) {
-    const content = message.content.replace(/<@!?\d+>/g, '').trim();
-    if (content || isDM) {
-      await handleMessage({ ...message, content: content || message.content });
+    // Remove bot mention from content if present
+    const cleanContent = message.content.replace(/<@!?\d+>/g, '').trim();
+    if (cleanContent || isDM) {
+      await handleMessage(message, cleanContent || message.content);
     }
   }
 });
