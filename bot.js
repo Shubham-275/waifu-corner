@@ -158,21 +158,19 @@ function isDeal(item) {
 async function searchAmiAmi(query, maxPrice = null) {
   const searchUrl = `https://www.amiami.com/eng/search/list/?s_keywords=${encodeURIComponent(query)}&s_st_condition_flg=1`;
   
-  const goal = `You are on AmiAmi's pre-owned figures search page.
+  const goal = `Scrape pre-owned figure listings from this AmiAmi page.
 
-IMPORTANT: The condition grades are in the product title in format "(Pre-owned ITEM:X/BOX:Y)" or "(Pre-owned ITEM:X BOX:Y)".
-For example: "(Pre-owned ITEM:A/BOX:B)" means item_grade is "A" and box_grade is "B".
+Look at each product card. The title text contains condition grades in format "(Pre-owned ITEM:X/BOX:Y)" where X and Y are grades like A, A-, B+, B, or C.
 
-For each figure listing visible (max 8), extract:
-- name: Product name (WITHOUT the Pre-owned ITEM:X/BOX:Y prefix)
-- price: Price in JPY (just the number, no commas)
-- item_grade: Extract from title - the letter after "ITEM:" (A, A-, B+, B, C, etc.)
-- box_grade: Extract from title - the letter after "BOX:" (A, A-, B+, B, C, etc.)
-- url: The full product page URL
-- image: The thumbnail image URL  
-- in_stock: true if available, false if sold out
+For each product (max 8), extract:
+- raw_title: Copy the FULL title text EXACTLY as displayed, starting with "(Pre-owned ITEM:..."
+- price: Price in JPY (number only)
+- url: Product link
+- image: Image URL
+- in_stock: true/false
 
-Return as JSON array.${maxPrice ? ` Only include items priced under ${maxPrice} JPY.` : ''}`;
+Return JSON array like:
+[{"raw_title": "(Pre-owned ITEM:A/BOX:B)Figure Name", "price": 5000, "url": "...", "image": "...", "in_stock": true}]${maxPrice ? `\n\nOnly items under ${maxPrice} JPY.` : ''}`;
 
   try {
     const controller = new AbortController();
@@ -251,6 +249,30 @@ Return as JSON array.${maxPrice ? ` Only include items priced under ${maxPrice} 
     }
     
     if (foundItems && foundItems.length > 0) {
+      // Post-process: Parse grades from raw_title/full_title/name
+      foundItems = foundItems.map(item => {
+        const title = item.raw_title || item.full_title || item.name || '';
+        
+        // Try to extract grades from title like "(Pre-owned ITEM:A/BOX:B)" or "(Pre-owned ITEM:A- BOX:B)"
+        const gradeMatch = title.match(/ITEM:\s*([A-C][+-]?)\s*[\/\s]*BOX:\s*([A-C][+-]?)/i);
+        
+        if (gradeMatch) {
+          item.item_grade = gradeMatch[1].toUpperCase();
+          item.box_grade = gradeMatch[2].toUpperCase();
+          // Clean the name - remove the condition prefix
+          item.name = title.replace(/^\(Pre-owned\s+ITEM:[A-C][+-]?\s*[\/\s]*BOX:[A-C][+-]?\)\s*/i, '').trim() || item.name;
+        } else {
+          // Keep existing values if present, otherwise null
+          item.item_grade = (item.item_grade && item.item_grade !== '') ? item.item_grade : null;
+          item.box_grade = (item.box_grade && item.box_grade !== '') ? item.box_grade : null;
+          item.name = item.name || title;
+        }
+        
+        console.log(`  → ${(item.name || 'Unknown').slice(0, 40)}... | Item: ${item.item_grade || '?'} | Box: ${item.box_grade || '?'}`);
+        
+        return item;
+      });
+      
       console.log(`✅ Mino found ${foundItems.length} items`);
       return { success: true, items: foundItems };
     }
