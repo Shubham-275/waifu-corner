@@ -159,17 +159,20 @@ async function searchAmiAmi(query, maxPrice = null) {
   const searchUrl = `https://www.amiami.com/eng/search/list/?s_keywords=${encodeURIComponent(query)}&s_st_condition_flg=1`;
   
   const goal = `You are on AmiAmi's pre-owned figures search page.
-For each figure listing visible (max 8), extract:
-- name: Full product name
-- price: Price in JPY (just the number)
-- condition: The condition text (like "Item:A Box:B")
-- item_grade: The item/figure grade (A, A-, B+, B, C)
-- box_grade: The box grade (A, A-, B+, B, C)
-- url: The full product page URL
-- image: The thumbnail image URL
-- in_stock: true if can be purchased, false if sold out
 
-Return as JSON array.${maxPrice ? ` Only items under ${maxPrice} JPY.` : ''}`;
+IMPORTANT: The condition grades are in the product title in format "(Pre-owned ITEM:X/BOX:Y)" or "(Pre-owned ITEM:X BOX:Y)".
+For example: "(Pre-owned ITEM:A/BOX:B)" means item_grade is "A" and box_grade is "B".
+
+For each figure listing visible (max 8), extract:
+- name: Product name (WITHOUT the Pre-owned ITEM:X/BOX:Y prefix)
+- price: Price in JPY (just the number, no commas)
+- item_grade: Extract from title - the letter after "ITEM:" (A, A-, B+, B, C, etc.)
+- box_grade: Extract from title - the letter after "BOX:" (A, A-, B+, B, C, etc.)
+- url: The full product page URL
+- image: The thumbnail image URL  
+- in_stock: true if available, false if sold out
+
+Return as JSON array.${maxPrice ? ` Only include items priced under ${maxPrice} JPY.` : ''}`;
 
   try {
     const controller = new AbortController();
