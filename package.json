@@ -1,0 +1,21 @@
+{
+  "name": "waifu-deal-sniper",
+  "version": "1.0.0",
+  "description": "🎎 Discord bot that hunts anime figure deals on AmiAmi",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "test": "node test.js",
+    "dev": "node --watch bot.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["discord", "bot", "anime", "figures", "amiami"],
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.1",
+    "sql.js": "^1.10.2"
+  }
+}
