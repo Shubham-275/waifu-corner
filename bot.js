@@ -8,7 +8,7 @@
 
 require('dotenv').config();
 
-const { Client, GatewayIntentBits, EmbedBuilder, ActivityType } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActivityType, Partials } = require('discord.js');
 const { TEMPLATES, SPICY_KEYWORDS, HUSBANDO_KEYWORDS, FIGURE_TYPE_KEYWORDS } = require('./templates');
 const db = require('./database');
 
@@ -612,7 +612,7 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
   ],
-  partials: ['CHANNEL'],
+  partials: [Partials.Channel, Partials.Message],
 });
 
 client.once('ready', () => {
@@ -636,6 +636,9 @@ client.on('messageCreate', async (message) => {
   
   const isDM = !message.guild;
   const isMentioned = message.mentions.has(client.user);
+  
+  // Debug logging
+  console.log(`📨 Message from ${message.author.username}: "${message.content.slice(0, 50)}" (DM: ${isDM})`);
   
   if (isDM || isMentioned) {
     const content = message.content.replace(/<@!?\d+>/g, '').trim();
