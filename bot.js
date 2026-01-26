@@ -199,50 +199,76 @@ Return as JSON array.${maxPrice ? ` Only items under ${maxPrice} JPY.` : ''}`;
     const text = await response.text();
     const lines = text.split('\n');
     
-    console.log('Mino raw response preview:', text.slice(0, 500));
+    console.log('Mino response length:', text.length, 'bytes');
+    
+    // Look for the COMPLETE event which contains results
+    let foundItems = null;
     
     for (const line of lines) {
       if (line.startsWith('data: ')) {
         try {
           const event = JSON.parse(line.slice(6));
           
-          // Handle different response formats
-          if (event.type === 'COMPLETE' || event.status === 'COMPLETED' || event.result) {
-            let items = event.result || event.resultJson || event.output;
+          // Log event types for debugging
+          if (event.type) {
+            console.log(`Mino event: ${event.type}`);
+          }
+          
+          // Check for COMPLETE event
+          if (event.type === 'COMPLETE') {
+            console.log('Mino COMPLETE event received');
+            
+            // Try different fields where results might be
+            let items = event.result || event.items || event.resultJson || event.output || event.data;
             
             if (typeof items === 'string') {
               items = items.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-              items = JSON.parse(items);
+              try {
+                items = JSON.parse(items);
+              } catch (e) {
+                console.error('Failed to parse items string:', e.message);
+              }
             }
             
-            if (items && (Array.isArray(items) || items.length > 0)) {
-              console.log(`Mino found ${Array.isArray(items) ? items.length : 'some'} items`);
-              return { success: true, items: Array.isArray(items) ? items : items?.items || [] };
+            // Handle nested items/result
+            if (items && typeof items === 'object') {
+              foundItems = Array.isArray(items) ? items : (items.items || items.result || []);
             }
           }
           
+          // Check for errors
           if (event.type === 'ERROR' || event.status === 'FAILED') {
-            console.error('Mino error:', event.error || event.message);
+            console.error('Mino error event:', event.error || event.message);
             return { success: false, error: event.error || event.message };
           }
         } catch (e) {
-          // Continue parsing other lines
+          // Not valid JSON, skip this line
         }
       }
     }
     
-    // Try parsing entire response as JSON (non-SSE format)
+    if (foundItems && foundItems.length > 0) {
+      console.log(`✅ Mino found ${foundItems.length} items`);
+      return { success: true, items: foundItems };
+    }
+    
+    // Fallback: try parsing entire response as JSON
     try {
       const fullJson = JSON.parse(text);
-      if (fullJson.result) {
-        console.log(`Mino found ${fullJson.result.length} items (direct JSON)`);
-        return { success: true, items: fullJson.result };
+      const items = fullJson.items || fullJson.result || (Array.isArray(fullJson) ? fullJson : null);
+      
+      if (items && items.length > 0) {
+        console.log(`✅ Mino found ${items.length} items (fallback JSON)`);
+        return { success: true, items };
       }
     } catch (e) {
       // Not valid JSON
     }
     
-    return { success: false, error: 'No valid response from Mino' };
+    // Log last part of response for debugging
+    console.log('Mino response tail:', text.slice(-500));
+    console.error('❌ No items found in Mino response');
+    return { success: false, error: 'No results found' };
   } catch (error) {
     console.error('Search error:', error.message);
     return { success: false, error: error.message };
