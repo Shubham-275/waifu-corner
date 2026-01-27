@@ -9,8 +9,11 @@
 require('dotenv').config();
 
 const { Client, GatewayIntentBits, EmbedBuilder, ActivityType, Partials } = require('discord.js');
-const { TEMPLATES, SPICY_KEYWORDS, HUSBANDO_KEYWORDS, FIGURE_TYPE_KEYWORDS } = require('./templates');
+const { TEMPLATES, SPICY_KEYWORDS, HUSBANDO_KEYWORDS, FIGURE_TYPE_KEYWORDS, GACHA_TEMPLATES, ROAST_TEMPLATES, COPIUM_TEMPLATES } = require('./templates');
 const db = require('./database');
+
+// Store last search results per user for gacha/roast
+const lastSearchResults = new Map();
 
 // =====================================
 // ⚙️ CONFIG
@@ -197,24 +200,164 @@ function findItemsArray(obj) {
 }
 
 // =====================================
-// 🔍 MINO API - AmiAmi Search
+// 🔍 MINO API - Multi-Site Search
 // =====================================
-async function searchAmiAmi(query, maxPrice = null) {
-  const searchUrl = `https://www.amiami.com/eng/search/list/?s_keywords=${encodeURIComponent(query)}&s_st_condition_flg=1`;
-  
-  const goal = `Scrape pre-owned figure listings from this AmiAmi page.
 
-Look at each product card. The title text contains condition grades in format "(Pre-owned ITEM:X/BOX:Y)" where X and Y are grades like A, A-, B+, B, or C.
+// Site configurations
+const SITES = {
+  amiami: {
+    name: 'AmiAmi',
+    emoji: '🇯🇵',
+    searchUrl: (query) => `https://www.amiami.com/eng/search/list/?s_keywords=${encodeURIComponent(query)}&s_st_condition_flg=1`,
+    goal: `Scrape pre-owned figure listings from this AmiAmi page.
+
+The title contains condition grades like "(Pre-owned ITEM:A/BOX:B)".
 
 For each product (max 8), extract:
-- raw_title: Copy the FULL title text EXACTLY as displayed, starting with "(Pre-owned ITEM:..."
+- raw_title: FULL title text including "(Pre-owned ITEM:X/BOX:Y)"
 - price: Price in JPY (number only)
 - url: Product link
 - image: Image URL
 - in_stock: true/false
+- scale: Figure scale if shown (e.g., "1/4", "1/7", "1/8") or null
+- manufacturer: Company name (e.g., "Good Smile Company", "FREEing", "Alter", "Kotobukiya", "SEGA", "Banpresto")
+- line: Product line if shown (e.g., "B-Style", "POP UP PARADE", "Nendoroid", "figma", "Prize Figure")
+- exclusive: true if exclusive (contains "Exclusive", "Limited", "Event"), false otherwise
 
-Return JSON array like:
-[{"raw_title": "(Pre-owned ITEM:A/BOX:B)Figure Name", "price": 5000, "url": "...", "image": "...", "in_stock": true}]${maxPrice ? `\n\nOnly items under ${maxPrice} JPY.` : ''}`;
+Return JSON array.`,
+  },
+  
+  solaris: {
+    name: 'Solaris Japan',
+    emoji: '☀️',
+    searchUrl: (query) => `https://solarisjapan.com/search?q=${encodeURIComponent(query)}&filter.category=Figures&filter.availability=In+Stock`,
+    goal: `Scrape figure listings from this Solaris Japan page.
+
+For each product (max 8), extract:
+- raw_title: Full product name
+- price: Price in JPY (number only, convert from USD if needed - multiply by 150)
+- url: Product link  
+- image: Image URL
+- in_stock: true if "Add to Cart" visible, false if "Sold Out" or "Notify Me"
+- scale: Figure scale (e.g., "1/4", "1/7") or null
+- manufacturer: Company name
+- line: Product line if visible
+- exclusive: true if limited/exclusive
+- condition: Condition text (e.g., "New", "Pre-owned A", "Pre-owned B")
+
+Return JSON array.`,
+  },
+  
+  mandarake: {
+    name: 'Mandarake',
+    emoji: '👹',
+    searchUrl: (query) => `https://order.mandarake.co.jp/order/listPage/list?keyword=${encodeURIComponent(query)}&lang=en&categoryCode=020102`,
+    goal: `Scrape figure listings from this Mandarake page.
+
+For each product (max 8), extract:
+- raw_title: Full product name
+- price: Price in JPY (number only)
+- url: Product link
+- image: Image URL
+- in_stock: true if purchasable
+- scale: Figure scale or null
+- manufacturer: Company name if shown
+- condition: Condition grade if shown (箱A/中身A = Box A/Item A)
+- store: Which Mandarake store has it
+
+Return JSON array.`,
+  },
+};
+
+// Rarity scoring based on actual figure attributes
+function calculateRarity(item) {
+  let score = 0;
+  const name = (item.raw_title || item.name || '').toLowerCase();
+  if (item.manufacturer) details.push(`�icing ${item.manufacturer}`);
+  const line = (item.line || '').toLowerCase();
+  const scale = item.scale || '';
+  const price = parseInt(item.price) || 0;
+  
+  // === SCALE SCORING ===
+  if (scale.includes('1/4')) score += 30;
+  else if (scale.includes('1/6')) score += 20;
+  else if (scale.includes('1/7')) score += 15;
+  else if (scale.includes('1/8')) score += 10;
+  else if (name.includes('1/4')) score += 30;
+  else if (name.includes('1/6')) score += 20;
+  else if (name.includes('1/7')) score += 15;
+  else if (name.includes('1/8')) score += 10;
+  
+  // === MANUFACTURER SCORING ===
+  const premiumMakers = ['alter', 'freeing', 'native', 'orchid seed', 'vertex', 'b\'full', 'binding'];
+  const goodMakers = ['good smile', 'kotobukiya', 'max factory', 'megahouse', 'phat', 'aquamarine', 'ques q', 'wing'];
+  const budgetMakers = ['sega', 'banpresto', 'taito', 'furyu', 'bandai spirits', 'prize'];
+  
+  if (premiumMakers.some(m => manufacturer.includes(m) || name.includes(m))) score += 25;
+  else if (goodMakers.some(m => manufacturer.includes(m) || name.includes(m))) score += 15;
+  else if (budgetMakers.some(m => manufacturer.includes(m) || name.includes(m))) score -= 10;
+  
+  // === LINE SCORING ===
+  if (line.includes('b-style') || name.includes('b-style')) score += 25;
+  if (line.includes('native') || name.includes('native')) score += 20;
+  if (name.includes('bunny') && (name.includes('1/4') || price > 20000)) score += 20;
+  if (line.includes('pop up parade') || name.includes('pop up parade')) score -= 5;
+  if (name.includes('prize') || name.includes('game-prize') || name.includes('ichiban kuji')) score -= 15;
+  if (line.includes('nendoroid') || name.includes('nendoroid')) score += 5;
+  if (line.includes('figma') || name.includes('figma')) score += 10;
+  
+  // === EXCLUSIVE SCORING ===
+  if (item.exclusive || name.includes('exclusive') || name.includes('limited')) score += 15;
+  if (name.includes('event') || name.includes('wf ') || name.includes('wonder festival')) score += 20;
+  
+  // === CONDITION SCORING ===
+  const itemGrade = (item.item_grade || '').toUpperCase();
+  const boxGrade = (item.box_grade || '').toUpperCase();
+  if (itemGrade === 'A' && boxGrade === 'A') score += 10;
+  if (itemGrade === 'A' && (boxGrade === 'B' || boxGrade === 'C')) score += 5; // Deal!
+  
+  // === PRICE SANITY CHECK ===
+  if (price > 30000) score += 10;
+  else if (price > 20000) score += 5;
+  else if (price < 2000) score -= 10;
+  
+  // Determine rarity tier
+  if (score >= 50) return { tier: 'ssr', score, label: '🌈 SSR - LEGENDARY' };
+  if (score >= 30) return { tier: 'sr', score, label: '⭐ SR - RARE' };
+  if (score >= 10) return { tier: 'r', score, label: '📦 R - COMMON' };
+  return { tier: 'salt', score, label: '🧂 N - BUDGET' };
+}
+
+// Get rarity details for display
+function getRarityDetails(item) {
+  const details = [];
+  const name = (item.raw_title || item.name || '').toLowerCase();
+  
+  // Scale
+  const scaleMatch = name.match(/1\/[4-8]/);
+  if (scaleMatch) details.push(`📏 ${scaleMatch[0]} Scale`);
+  
+  // Manufacturer
+  if (item.manufacturer) details.push(`�icing ${item.manufacturer}`);
+  
+  // Line
+  if (item.line) details.push(`📦 ${item.line}`);
+  
+  // Special tags
+  if (name.includes('exclusive') || name.includes('limited') || item.exclusive) details.push(`✨ Limited/Exclusive`);
+  if (name.includes('b-style') || name.includes('bunny')) details.push(`🐰 Bunny`);
+  if (name.includes('native')) details.push(`🔞 Native`);
+  if (name.includes('prize') || name.includes('game-prize')) details.push(`🎮 Prize Figure`);
+  
+  return details;
+}
+
+async function searchSite(siteKey, query, maxPrice = null) {
+  const site = SITES[siteKey];
+  if (!site) return { success: false, error: 'Unknown site' };
+  
+  const searchUrl = site.searchUrl(query);
+  const goal = site.goal + (maxPrice ? `\n\nOnly items under ${maxPrice} JPY.` : '');
 
   try {
     const controller = new AbortController();
@@ -226,17 +369,14 @@ Return JSON array like:
         'Content-Type': 'application/json',
         'X-API-Key': CONFIG.MINO_API_KEY,
       },
-      body: JSON.stringify({ 
-        url: searchUrl, 
-        goal,
-      }),
+      body: JSON.stringify({ url: searchUrl, goal }),
       signal: controller.signal,
     });
     
     clearTimeout(timeout);
 
     if (!response.ok) {
-      console.error('Mino API error:', response.status);
+      console.error(`${site.name} API error:`, response.status);
       return { success: false, error: `API error: ${response.status}` };
     }
 
@@ -244,9 +384,8 @@ Return JSON array like:
     const text = await response.text();
     const lines = text.split('\n');
     
-    console.log('Mino response length:', text.length, 'bytes');
+    console.log(`${site.name} response length:`, text.length, 'bytes');
     
-    // Look for the COMPLETE event which contains results
     let foundItems = null;
     
     for (const line of lines) {
@@ -254,97 +393,123 @@ Return JSON array like:
         try {
           const event = JSON.parse(line.slice(6));
           
-          // Log event types for debugging
           if (event.type) {
-            console.log(`Mino event: ${event.type}`);
+            console.log(`${site.name} event: ${event.type}`);
           }
           
-          // Check for COMPLETE event
           if (event.type === 'COMPLETE') {
-            console.log('Mino COMPLETE event received');
-            
-            // Smart parser: find any array of objects with url/price fields
+            console.log(`${site.name} COMPLETE event received`);
             let items = findItemsArray(event);
-            
             if (items && items.length > 0) {
               foundItems = items;
             }
           }
           
-          // Check for errors
           if (event.type === 'ERROR' || event.status === 'FAILED') {
-            console.error('Mino error event:', event.error || event.message);
+            console.error(`${site.name} error event:`, event.error || event.message);
             return { success: false, error: event.error || event.message };
           }
         } catch (e) {
-          // Not valid JSON, skip this line
+          // Not valid JSON, skip
         }
       }
     }
     
     if (foundItems && foundItems.length > 0) {
-      // Post-process: Parse grades from raw_title/full_title/name
+      // Post-process items
       foundItems = foundItems.map(item => {
+        // Parse grades from title
         const title = item.raw_title || item.full_title || item.name || '';
-        
-        // Try to extract grades from title like "(Pre-owned ITEM:A/BOX:B)" or "(Pre-owned ITEM:A- BOX:B)"
         const gradeMatch = title.match(/ITEM:\s*([A-C][+-]?)\s*[\/\s]*BOX:\s*([A-C][+-]?)/i);
         
         if (gradeMatch) {
           item.item_grade = gradeMatch[1].toUpperCase();
           item.box_grade = gradeMatch[2].toUpperCase();
-          // Clean the name - remove the condition prefix
           item.name = title.replace(/^\(Pre-owned\s+ITEM:[A-C][+-]?\s*[\/\s]*BOX:[A-C][+-]?\)\s*/i, '').trim() || item.name;
         } else {
-          // Keep existing values if present, otherwise null
-          item.item_grade = (item.item_grade && item.item_grade !== '') ? item.item_grade : null;
-          item.box_grade = (item.box_grade && item.box_grade !== '') ? item.box_grade : null;
+          item.item_grade = item.item_grade || null;
+          item.box_grade = item.box_grade || null;
           item.name = item.name || title;
         }
         
-        console.log(`  → ${(item.name || 'Unknown').slice(0, 40)}... | Item: ${item.item_grade || '?'} | Box: ${item.box_grade || '?'}`);
+        // Calculate rarity
+        item.rarity = calculateRarity(item);
+        item.rarityDetails = getRarityDetails(item);
+        item.site = siteKey;
+        item.siteName = site.name;
+        item.siteEmoji = site.emoji;
+        
+        console.log(`  → ${(item.name || 'Unknown').slice(0, 40)}... | ${item.rarity.label}`);
         
         return item;
       });
       
-      console.log(`✅ Mino found ${foundItems.length} items`);
-      return { success: true, items: foundItems };
+      console.log(`✅ ${site.name} found ${foundItems.length} items`);
+      return { success: true, items: foundItems, site: siteKey };
     }
     
-    // Fallback: try parsing entire response as JSON
+    // Fallback
     try {
       const fullJson = JSON.parse(text);
       const items = findItemsArray(fullJson);
-      
       if (items && items.length > 0) {
-        // Apply same post-processing
         const processedItems = items.map(item => {
-          const title = item.raw_title || item.full_title || item.name || '';
-          const gradeMatch = title.match(/ITEM:\s*([A-C][+-]?)\s*[\/\s]*BOX:\s*([A-C][+-]?)/i);
-          
-          if (gradeMatch) {
-            item.item_grade = gradeMatch[1].toUpperCase();
-            item.box_grade = gradeMatch[2].toUpperCase();
-            item.name = title.replace(/^\(Pre-owned\s+ITEM:[A-C][+-]?\s*[\/\s]*BOX:[A-C][+-]?\)\s*/i, '').trim() || item.name;
-          }
+          item.rarity = calculateRarity(item);
+          item.rarityDetails = getRarityDetails(item);
+          item.site = siteKey;
+          item.siteName = site.name;
+          item.siteEmoji = site.emoji;
           return item;
         });
-        
-        console.log(`✅ Mino found ${processedItems.length} items (fallback)`);
-        return { success: true, items: processedItems };
+        console.log(`✅ ${site.name} found ${processedItems.length} items (fallback)`);
+        return { success: true, items: processedItems, site: siteKey };
       }
     } catch (e) {
       // Not valid JSON
     }
     
-    // Log last part of response for debugging
-    console.log('Mino response tail:', text.slice(-500));
-    console.error('❌ No items found in Mino response');
+    console.log(`${site.name} response tail:`, text.slice(-500));
+    console.error(`❌ No items found from ${site.name}`);
     return { success: false, error: 'No results found' };
   } catch (error) {
-    console.error('Search error:', error.message);
+    console.error(`${site.name} search error:`, error.message);
     return { success: false, error: error.message };
   }
+}
+
+// Main search function - defaults to AmiAmi, can specify site
+async function searchAmiAmi(query, maxPrice = null, siteKey = 'amiami') {
+  return searchSite(siteKey, query, maxPrice);
+}
+
+// Search multiple sites at once
+async function searchAllSites(query, maxPrice = null) {
+  const results = await Promise.allSettled([
+    searchSite('amiami', query, maxPrice),
+    // Add more sites here as needed:
+    // searchSite('solaris', query, maxPrice),
+    // searchSite('mandarake', query, maxPrice),
+  ]);
+  
+  const allItems = [];
+  const siteResults = {};
+  
+  results.forEach((result, index) => {
+    const siteKey = ['amiami', 'solaris', 'mandarake'][index];
+    if (result.status === 'fulfilled' && result.value.success) {
+      siteResults[siteKey] = result.value;
+      allItems.push(...result.value.items);
+    }
+  });
+  
+  // Sort by rarity score
+  allItems.sort((a, b) => (b.rarity?.score || 0) - (a.rarity?.score || 0));
+  
+  return {
+    success: allItems.length > 0,
+    items: allItems,
+    siteResults,
+  };
 }
 
 // =====================================
@@ -353,10 +518,24 @@ Return JSON array like:
 function createFigureEmbed(item) {
   const isGoodDeal = isDeal(item);
   const price = parseInt(item.price) || 0;
+  const rarity = item.rarity?.tier || 'r';
+  const rarityLabel = item.rarity?.label || '';
+  
+  // Color based on rarity or deal status
+  const rarityColors = {
+    ssr: 0xFFD700,  // Gold
+    sr: 0xA855F7,   // Purple
+    r: 0x3B82F6,    // Blue
+    salt: 0x6B7280, // Gray
+  };
+  const embedColor = isGoodDeal ? 0xFF6B6B : (rarityColors[rarity] || 0x6C5CE7);
+  
+  // Title prefix based on rarity
+  const rarityPrefix = rarity === 'ssr' ? '🌈 ' : rarity === 'sr' ? '⭐ ' : '';
   
   const embed = new EmbedBuilder()
-    .setColor(isGoodDeal ? 0xFF6B6B : 0x6C5CE7)
-    .setTitle(`${isGoodDeal ? '🔥 ' : ''}${(item.name || 'Figure').slice(0, 250)}`)
+    .setColor(embedColor)
+    .setTitle(`${isGoodDeal ? '🔥 ' : rarityPrefix}${(item.name || 'Figure').slice(0, 250)}`)
     .setURL(item.url || 'https://www.amiami.com');
   
   if (item.image) {
@@ -366,15 +545,26 @@ function createFigureEmbed(item) {
   let desc = '';
   if (isGoodDeal) {
     desc += `**${pick(TEMPLATES.deal_alert)}**\n\n`;
+  } else if (rarity === 'ssr') {
+    desc += `**${rarityLabel}**\n\n`;
   }
   
   desc += `💴 **¥${price.toLocaleString()}**\n`;
   desc += `✨ Figure: **${item.item_grade || '?'}** | 📦 Box: **${item.box_grade || '?'}**\n`;
-  desc += `${item.in_stock !== false ? '✅ In Stock' : '❌ Sold Out'}\n\n`;
-  desc += `*${getConditionComment(item.item_grade, item.box_grade)}*`;
+  desc += `${item.in_stock !== false ? '✅ In Stock' : '❌ Sold Out'}`;
+  
+  // Add rarity tags if present
+  if (item.rarityDetails && item.rarityDetails.length > 0) {
+    desc += `\n\n🏷️ ${item.rarityDetails.slice(0, 3).join(' • ')}`;
+  }
+  
+  desc += `\n\n*${getConditionComment(item.item_grade, item.box_grade)}*`;
   
   embed.setDescription(desc);
-  embed.setFooter({ text: `${getPriceReaction(price)} • Click title to buy!` });
+  
+  // Footer with site info if multi-site
+  const siteInfo = item.siteEmoji ? `${item.siteEmoji} ${item.siteName} • ` : '';
+  embed.setFooter({ text: `${siteInfo}${getPriceReaction(price)} • Click title to buy!` });
   
   return embed;
 }
@@ -425,6 +615,31 @@ function parseMessage(content) {
   const unwatchMatch = lower.match(/^(stop watching|unwatch|remove|cancel|delete)\s+(.+)/i);
   if (unwatchMatch) {
     return { intent: 'unwatch', query: unwatchMatch[2].trim() };
+  }
+  
+  // === NEW FEATURES ===
+  
+  // Gacha mode
+  const gachaMatch = lower.match(/^(?:gacha|roll|spin|gamble|yolo)\s+(.+)/i);
+  if (gachaMatch) {
+    return { intent: 'gacha', query: gachaMatch[1].trim() };
+  }
+  if (/^(?:gacha|roll|spin)$/i.test(lower)) {
+    return { intent: 'gacha_last' };
+  }
+  
+  // Roast mode
+  if (/^(?:roast|roast me|roast this|judge|judge me|flame)$/i.test(lower)) {
+    return { intent: 'roast' };
+  }
+  const roastMatch = lower.match(/^(?:roast|judge|flame)\s+(.+)/i);
+  if (roastMatch) {
+    return { intent: 'roast_query', query: roastMatch[1].trim() };
+  }
+  
+  // Copium mode
+  if (/^(?:copium|cope|copium mode|inhale|sad|pain)$/i.test(lower)) {
+    return { intent: 'copium' };
   }
   
   // Watch/alert
@@ -522,6 +737,27 @@ async function handleMessage(message, content) {
         
       case 'stats':
         await handleStats(message, user);
+        break;
+      
+      // === NEW FEATURES ===
+      case 'gacha':
+        await handleGacha(message, user, parsed.query);
+        break;
+        
+      case 'gacha_last':
+        await handleGachaLast(message, user);
+        break;
+        
+      case 'roast':
+        await handleRoast(message, user);
+        break;
+        
+      case 'roast_query':
+        await handleRoastQuery(message, user, parsed.query);
+        break;
+        
+      case 'copium':
+        await handleCopium(message, user);
         break;
         
       default:
@@ -681,6 +917,260 @@ async function handleStats(message, user) {
 📅 **Joined:** ${new Date(stats.created_at).toLocaleDateString()}
     `)
     .setFooter({ text: `🌍 Global: ${globalStats.totalUsers} hunters • ${globalStats.totalSearches} searches` });
+  
+  await message.reply({ embeds: [embed] });
+}
+
+// =====================================
+// 🎰 GACHA MODE - Let fate decide!
+// =====================================
+async function handleGacha(message, user, query) {
+  const cleanQuery = sanitizeQuery(query);
+  if (!cleanQuery) {
+    await message.reply("🎰 Gacha what? Try: `gacha rem` or `gacha miku figures`");
+    return;
+  }
+  
+  // Rate limit
+  if (!checkRateLimit(user.discord_id)) {
+    await message.reply("⏳ Even gacha has rate limits! Try again in a minute~");
+    return;
+  }
+  
+  // Show rolling message
+  const rollingMsg = await message.reply(pick(GACHA_TEMPLATES.rolling));
+  
+  // Search for figures
+  const result = await searchAmiAmi(cleanQuery);
+  db.incrementSearchCount(user.id);
+  
+  if (!result.success || !result.items || result.items.length === 0) {
+    await rollingMsg.edit("🎰 The gacha machine is empty... No figures found! Try a different search.");
+    return;
+  }
+  
+  // Store for later gacha
+  lastSearchResults.set(user.discord_id, { query: cleanQuery, items: result.items, timestamp: Date.now() });
+  
+  // Pick random figure
+  const chosen = result.items[Math.floor(Math.random() * result.items.length)];
+  const price = parseInt(chosen.price) || 0;
+  
+  // Use calculated rarity from the item (now includes scale, manufacturer, etc.)
+  const rarity = chosen.rarity?.tier || 'r';
+  const rarityLabel = chosen.rarity?.label || '📦 R - COMMON';
+  const rarityScore = chosen.rarity?.score || 0;
+  const rarityDetails = chosen.rarityDetails || [];
+  
+  // Build response
+  await new Promise(r => setTimeout(r, 1500)); // Dramatic pause
+  
+  // Rarity-based colors
+  const rarityColors = {
+    ssr: 0xFFD700,  // Gold
+    sr: 0xA855F7,   // Purple
+    r: 0x3B82F6,    // Blue
+    salt: 0x6B7280, // Gray
+  };
+  
+  const embed = new EmbedBuilder()
+    .setColor(rarityColors[rarity] || 0x6C5CE7)
+    .setTitle(`🎰 ${pick(GACHA_TEMPLATES.rarity[rarity])}`)
+    .setDescription(`${pick(GACHA_TEMPLATES.reveal)}\n\n**${(chosen.name || 'Mystery Figure').slice(0, 200)}**`)
+    .addFields(
+      { name: '💴 Price', value: `¥${price.toLocaleString()}`, inline: true },
+      { name: '✨ Condition', value: `Item: ${chosen.item_grade || '?'} | Box: ${chosen.box_grade || '?'}`, inline: true },
+      { name: '📦 Stock', value: chosen.in_stock !== false ? '✅ Available!' : '❌ Sold Out', inline: true }
+    )
+    .setURL(chosen.url || 'https://www.amiami.com');
+  
+  // Add rarity details if any
+  if (rarityDetails.length > 0) {
+    embed.addFields({ name: '🏷️ Tags', value: rarityDetails.slice(0, 4).join(' • '), inline: false });
+  }
+  
+  embed.setFooter({ text: `${rarityLabel} (Score: ${rarityScore}) • 🎲 Rolled from ${result.items.length} figures` });
+  
+  if (chosen.image) {
+    embed.setThumbnail(chosen.image);
+  }
+  
+  await rollingMsg.edit({ content: null, embeds: [embed] });
+}
+
+async function handleGachaLast(message, user) {
+  const lastSearch = lastSearchResults.get(user.discord_id);
+  
+  if (!lastSearch || Date.now() - lastSearch.timestamp > 10 * 60 * 1000) {
+    await message.reply("🎰 No recent search to gacha from! Try: `gacha rem` or search something first.");
+    return;
+  }
+  
+  // Reuse the stored results
+  const chosen = lastSearch.items[Math.floor(Math.random() * lastSearch.items.length)];
+  const price = parseInt(chosen.price) || 0;
+  
+  // Use calculated rarity
+  const rarity = chosen.rarity?.tier || 'r';
+  const rarityLabel = chosen.rarity?.label || '📦 R - COMMON';
+  const rarityScore = chosen.rarity?.score || 0;
+  const rarityDetails = chosen.rarityDetails || [];
+  
+  // Rarity-based colors
+  const rarityColors = {
+    ssr: 0xFFD700,  // Gold
+    sr: 0xA855F7,   // Purple
+    r: 0x3B82F6,    // Blue
+    salt: 0x6B7280, // Gray
+  };
+  
+  const embed = new EmbedBuilder()
+    .setColor(rarityColors[rarity] || 0x6C5CE7)
+    .setTitle(`🎰 ${pick(GACHA_TEMPLATES.rarity[rarity])}`)
+    .setDescription(`**${(chosen.name || 'Mystery Figure').slice(0, 200)}**\n\n💴 ¥${price.toLocaleString()}`)
+    .setURL(chosen.url || 'https://www.amiami.com');
+  
+  if (rarityDetails.length > 0) {
+    embed.addFields({ name: '🏷️ Tags', value: rarityDetails.slice(0, 3).join(' • '), inline: false });
+  }
+  
+  embed.setFooter({ text: `${rarityLabel} (Score: ${rarityScore}) • 🎲 Rerolled from "${lastSearch.query}"` });
+  
+  if (chosen.image) {
+    embed.setThumbnail(chosen.image);
+  }
+  
+  await message.reply({ embeds: [embed] });
+}
+
+// =====================================
+// 🔥 ROAST MODE - Savage feedback
+// =====================================
+async function handleRoast(message, user) {
+  const lastSearch = lastSearchResults.get(user.discord_id);
+  
+  if (!lastSearch || Date.now() - lastSearch.timestamp > 10 * 60 * 1000) {
+    await message.reply("🔥 Roast what? Search for something first, then say `roast`!");
+    return;
+  }
+  
+  await handleRoastQuery(message, user, lastSearch.query, lastSearch.items);
+}
+
+async function handleRoastQuery(message, user, query, existingItems = null) {
+  const cleanQuery = sanitizeQuery(query);
+  if (!cleanQuery) {
+    await message.reply("🔥 Can't roast nothing! Try: `roast rem` or search first then say `roast`");
+    return;
+  }
+  
+  let items = existingItems;
+  
+  // If no existing items, we need to search
+  if (!items) {
+    if (!checkRateLimit(user.discord_id)) {
+      await message.reply("⏳ Too many roasts! Your ego needs a break~");
+      return;
+    }
+    
+    const result = await searchAmiAmi(cleanQuery);
+    items = result.items || [];
+    
+    // Store for later
+    if (items.length > 0) {
+      lastSearchResults.set(user.discord_id, { query: cleanQuery, items, timestamp: Date.now() });
+    }
+  }
+  
+  // Build the roast
+  let roast = '';
+  
+  // Character-specific roast
+  const lowerQuery = cleanQuery.toLowerCase();
+  for (const [char, roasts] of Object.entries(ROAST_TEMPLATES.character_specific)) {
+    if (lowerQuery.includes(char)) {
+      roast += pick(roasts) + '\n\n';
+      break;
+    }
+  }
+  
+  // General roast
+  roast += fill(pick(ROAST_TEMPLATES.general), { query: cleanQuery });
+  
+  // Add price roast if we have items
+  if (items && items.length > 0) {
+    const avgPrice = items.reduce((sum, i) => sum + (parseInt(i.price) || 0), 0) / items.length;
+    
+    if (avgPrice > 15000) {
+      const meals = Math.floor(avgPrice / 500);
+      roast += '\n\n' + fill(pick(ROAST_TEMPLATES.expensive), { price: Math.round(avgPrice).toLocaleString(), meals });
+    } else if (avgPrice < 2000) {
+      roast += '\n\n' + fill(pick(ROAST_TEMPLATES.cheap), { price: Math.round(avgPrice).toLocaleString() });
+    }
+    
+    // Sold out roast
+    const soldOut = items.filter(i => i.in_stock === false).length;
+    if (soldOut > items.length / 2) {
+      roast += '\n\n' + pick(ROAST_TEMPLATES.soldout);
+    }
+  }
+  
+  const embed = new EmbedBuilder()
+    .setColor(0xFF4444)
+    .setTitle(`🔥 ROAST TIME 🔥`)
+    .setDescription(roast)
+    .setFooter({ text: "Don't shoot the messenger~ 💅" });
+  
+  await message.reply({ embeds: [embed] });
+}
+
+// =====================================
+// 😭 COPIUM MODE - Maximum cope
+// =====================================
+async function handleCopium(message, user) {
+  const lastSearch = lastSearchResults.get(user.discord_id);
+  
+  let copiumType = 'no_results';
+  let context = '';
+  
+  if (lastSearch && Date.now() - lastSearch.timestamp < 10 * 60 * 1000) {
+    const items = lastSearch.items || [];
+    const soldOut = items.filter(i => i.in_stock === false).length;
+    const avgPrice = items.length > 0 
+      ? items.reduce((sum, i) => sum + (parseInt(i.price) || 0), 0) / items.length 
+      : 0;
+    
+    if (items.length === 0) {
+      copiumType = 'no_results';
+    } else if (soldOut > items.length / 2) {
+      copiumType = 'sold_out';
+      context = `\n\n*${soldOut}/${items.length} items sold out*`;
+    } else if (avgPrice > 15000) {
+      copiumType = 'expensive';
+      context = `\n\n*Average price: ¥${Math.round(avgPrice).toLocaleString()}*`;
+    } else {
+      // Check for damaged boxes (deals)
+      const hasDamagedBox = items.some(i => 
+        (i.box_grade === 'B' || i.box_grade === 'C' || i.box_grade === 'B-') &&
+        (i.item_grade === 'A' || i.item_grade === 'A-')
+      );
+      if (hasDamagedBox) {
+        copiumType = 'damaged_box';
+      }
+    }
+  }
+  
+  const copiumMessages = COPIUM_TEMPLATES[copiumType] || COPIUM_TEMPLATES.no_results;
+  
+  // Pick 2-3 random copium messages
+  const shuffled = [...copiumMessages].sort(() => Math.random() - 0.5);
+  const selectedCopium = shuffled.slice(0, Math.min(3, shuffled.length));
+  
+  const embed = new EmbedBuilder()
+    .setColor(0x9B59B6)
+    .setTitle(`💨 COPIUM DISPENSARY 💨`)
+    .setDescription(selectedCopium.join('\n\n') + context)
+    .setFooter({ text: "Remember: Figures can't leave you... unlike your wallet 💸" });
   
   await message.reply({ embeds: [embed] });
 }
