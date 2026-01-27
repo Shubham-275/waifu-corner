@@ -273,7 +273,7 @@ Return JSON array.`,
 function calculateRarity(item) {
   let score = 0;
   const name = (item.raw_title || item.name || '').toLowerCase();
-  if (item.manufacturer) details.push(`�icing ${item.manufacturer}`);
+  const manufacturer = (item.manufacturer || '').toLowerCase();
   const line = (item.line || '').toLowerCase();
   const scale = item.scale || '';
   const price = parseInt(item.price) || 0;
@@ -338,7 +338,7 @@ function getRarityDetails(item) {
   if (scaleMatch) details.push(`📏 ${scaleMatch[0]} Scale`);
   
   // Manufacturer
-  if (item.manufacturer) details.push(`�icing ${item.manufacturer}`);
+  if (item.manufacturer) details.push(`🏭 ${item.manufacturer}`);
   
   // Line
   if (item.line) details.push(`📦 ${item.line}`);
@@ -1006,6 +1006,11 @@ async function handleGachaLast(message, user) {
     return;
   }
   
+  if (!lastSearch.items || lastSearch.items.length === 0) {
+    await message.reply("🎰 No figures in the last search! Try: `gacha rem`");
+    return;
+  }
+  
   // Reuse the stored results
   const chosen = lastSearch.items[Math.floor(Math.random() * lastSearch.items.length)];
   const price = parseInt(chosen.price) || 0;
@@ -1254,19 +1259,28 @@ client.once('ready', () => {
 });
 
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  
-  const isDM = !message.guild;
-  const isMentioned = message.mentions.has(client.user);
-  
-  // Debug logging
-  console.log(`📨 Message from ${message.author.username}: "${message.content.slice(0, 50)}" (DM: ${isDM})`);
-  
-  if (isDM || isMentioned) {
-    // Remove bot mention from content if present
-    const cleanContent = message.content.replace(/<@!?\d+>/g, '').trim();
-    if (cleanContent || isDM) {
-      await handleMessage(message, cleanContent || message.content);
+  try {
+    if (message.author.bot) return;
+    
+    const isDM = !message.guild;
+    const isMentioned = message.mentions.has(client.user);
+    
+    // Debug logging
+    console.log(`📨 Message from ${message.author.username}: "${message.content.slice(0, 50)}" (DM: ${isDM})`);
+    
+    if (isDM || isMentioned) {
+      // Remove bot mention from content if present
+      const cleanContent = message.content.replace(/<@!?\d+>/g, '').trim();
+      if (cleanContent || isDM) {
+        await handleMessage(message, cleanContent || message.content);
+      }
+    }
+  } catch (error) {
+    console.error('Message handler error:', error);
+    try {
+      await message.reply("😵 Something went wrong! Try again?").catch(() => {});
+    } catch (e) {
+      // Can't reply, just log
     }
   }
 });
