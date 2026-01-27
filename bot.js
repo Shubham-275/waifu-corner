@@ -1069,23 +1069,9 @@ async function handleRoastQuery(message, user, query, existingItems = null) {
     return;
   }
   
-  let items = existingItems;
-  
-  // If no existing items, we need to search
-  if (!items) {
-    if (!checkRateLimit(user.discord_id)) {
-      await message.reply("⏳ Too many roasts! Your ego needs a break~");
-      return;
-    }
-    
-    const result = await searchAmiAmi(cleanQuery);
-    items = result.items || [];
-    
-    // Store for later
-    if (items.length > 0) {
-      lastSearchResults.set(user.discord_id, { query: cleanQuery, items, timestamp: Date.now() });
-    }
-  }
+  // Use existing items if provided (from previous search), otherwise roast without price data
+  // NO API CALL - roasts are template-based!
+  const items = existingItems || [];
   
   // Build the roast
   let roast = '';
@@ -1102,7 +1088,7 @@ async function handleRoastQuery(message, user, query, existingItems = null) {
   // General roast
   roast += fill(pick(ROAST_TEMPLATES.general), { query: cleanQuery });
   
-  // Add price roast if we have items
+  // Add price roast ONLY if we have items from a previous search
   if (items && items.length > 0) {
     const avgPrice = items.reduce((sum, i) => sum + (parseInt(i.price) || 0), 0) / items.length;
     
