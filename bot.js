@@ -15,6 +15,17 @@ const db = require('./database');
 // Store last search results per user for gacha/roast
 const lastSearchResults = new Map();
 
+// Cleanup old search results every 15 minutes to prevent memory leak
+setInterval(() => {
+  const now = Date.now();
+  const maxAge = 15 * 60 * 1000; // 15 minutes
+  for (const [userId, data] of lastSearchResults.entries()) {
+    if (now - data.timestamp > maxAge) {
+      lastSearchResults.delete(userId);
+    }
+  }
+}, 15 * 60 * 1000);
+
 // =====================================
 // ⚙️ CONFIG
 // =====================================
@@ -95,6 +106,16 @@ function checkRateLimit(userId) {
   
   return userLimits.count <= CONFIG.RATE_LIMIT_MAX;
 }
+
+// Cleanup old rate limits every 10 minutes to prevent memory leak
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, limits] of rateLimits.entries()) {
+    if (now > limits.resetAt + 60000) {
+      rateLimits.delete(userId);
+    }
+  }
+}, 10 * 60 * 1000);
 
 // =====================================
 // 🎭 PERSONALITY DETECTION
@@ -208,6 +229,7 @@ const SITES = {
   amiami: {
     name: 'AmiAmi',
     emoji: '🇯🇵',
+    currency: 'JPY',
     searchUrl: (query) => `https://www.amiami.com/eng/search/list/?s_keywords=${encodeURIComponent(query)}&s_st_condition_flg=1`,
     goal: `Scrape pre-owned figure listings from this AmiAmi page.
 
@@ -227,43 +249,40 @@ For each product (max 8), extract:
 Return JSON array.`,
   },
   
-  solaris: {
-    name: 'Solaris Japan',
-    emoji: '☀️',
-    searchUrl: (query) => `https://solarisjapan.com/search?q=${encodeURIComponent(query)}&filter.category=Figures&filter.availability=In+Stock`,
-    goal: `Scrape figure listings from this Solaris Japan page.
+  mercari: {
+    name: 'Mercari US',
+    emoji: '🇺🇸',
+    currency: 'USD',
+    searchUrl: (query) => `https://www.mercari.com/search/?keyword=${encodeURIComponent(query + ' figure')}&status=sold_out%3Afalse`,
+    goal: `Scrape figure listings from this Mercari search page.
 
 For each product (max 8), extract:
-- raw_title: Full product name
-- price: Price in JPY (number only, convert from USD if needed - multiply by 150)
-- url: Product link  
+- raw_title: Full product title
+- price: Price in USD (number only, no $)
+- url: Product link
 - image: Image URL
-- in_stock: true if "Add to Cart" visible, false if "Sold Out" or "Notify Me"
-- scale: Figure scale (e.g., "1/4", "1/7") or null
-- manufacturer: Company name
-- line: Product line if visible
-- exclusive: true if limited/exclusive
-- condition: Condition text (e.g., "New", "Pre-owned A", "Pre-owned B")
+- in_stock: true if available, false if sold
+- condition: Item condition (e.g., "New", "Like new", "Good")
+- seller: Seller name if visible
 
 Return JSON array.`,
   },
   
-  mandarake: {
-    name: 'Mandarake',
-    emoji: '👹',
-    searchUrl: (query) => `https://order.mandarake.co.jp/order/listPage/list?keyword=${encodeURIComponent(query)}&lang=en&categoryCode=020102`,
-    goal: `Scrape figure listings from this Mandarake page.
+  solaris: {
+    name: 'Solaris Japan',
+    emoji: '☀️',
+    currency: 'USD',
+    searchUrl: (query) => `https://solarisjapan.com/search?q=${encodeURIComponent(query)}&filter.category=Figures`,
+    goal: `Scrape figure listings from this Solaris Japan search page.
 
 For each product (max 8), extract:
 - raw_title: Full product name
-- price: Price in JPY (number only)
+- price: Price in USD (number only, no $)
 - url: Product link
 - image: Image URL
-- in_stock: true if purchasable
-- scale: Figure scale or null
-- manufacturer: Company name if shown
-- condition: Condition grade if shown (箱A/中身A = Box A/Item A)
-- store: Which Mandarake store has it
+- in_stock: true if "Add to Cart" visible, false if "Sold Out" or "Notify Me"
+- condition: Condition text (e.g., "BRAND NEW", "PRE ORDER", "Pre-owned")
+- manufacturer: Company name if visible in title (e.g., "Good Smile Company", "Taito")
 
 Return JSON array.`,
   },
@@ -484,21 +503,22 @@ async function searchAmiAmi(query, maxPrice = null, siteKey = 'amiami') {
 
 // Search multiple sites at once
 async function searchAllSites(query, maxPrice = null) {
-  const results = await Promise.allSettled([
-    searchSite('amiami', query, maxPrice),
-    // Add more sites here as needed:
-    // searchSite('solaris', query, maxPrice),
-    // searchSite('mandarake', query, maxPrice),
-  ]);
+  const siteKeys = ['amiami', 'mercari', 'solaris'];
+  
+  const results = await Promise.allSettled(
+    siteKeys.map(site => searchSite(site, query, maxPrice))
+  );
   
   const allItems = [];
   const siteResults = {};
   
   results.forEach((result, index) => {
-    const siteKey = ['amiami', 'solaris', 'mandarake'][index];
+    const siteKey = siteKeys[index];
     if (result.status === 'fulfilled' && result.value.success) {
       siteResults[siteKey] = result.value;
       allItems.push(...result.value.items);
+    } else {
+      console.log(`${siteKey} failed:`, result.reason?.message || result.value?.error);
     }
   });
   
@@ -509,6 +529,7 @@ async function searchAllSites(query, maxPrice = null) {
     success: allItems.length > 0,
     items: allItems,
     siteResults,
+    sitesSearched: siteKeys,
   };
 }
 
@@ -642,6 +663,29 @@ function parseMessage(content) {
     return { intent: 'copium' };
   }
   
+  // === MULTI-SITE SEARCH ===
+  
+  // Search all sites
+  const allSitesMatch = lower.match(/^(?:all|everywhere|all sites)\s+(.+?)(?:\s+under\s+|\s*<\s*)?(\d+)?$/i);
+  if (allSitesMatch) {
+    const query = allSitesMatch[1].replace(/\s*(figures?|deals?)\s*/gi, ' ').trim();
+    const price = allSitesMatch[2] ? parseInt(allSitesMatch[2]) : null;
+    if (query.length > 2) {
+      return { intent: 'search_all', query, maxPrice: price };
+    }
+  }
+  
+  // Site-specific search: mercari <query>, solaris <query>, amiami <query>
+  const siteMatch = lower.match(/^(mercari|solaris|amiami)\s+(.+?)(?:\s+under\s+|\s*<\s*)?(\d+)?$/i);
+  if (siteMatch) {
+    const site = siteMatch[1].toLowerCase();
+    const query = siteMatch[2].replace(/\s*(figures?|deals?)\s*/gi, ' ').trim();
+    const price = siteMatch[3] ? parseInt(siteMatch[3]) : null;
+    if (query.length > 2) {
+      return { intent: 'search_site', site, query, maxPrice: price };
+    }
+  }
+  
   // Watch/alert
   const watchPatterns = [
     /^(?:watch|alert|notify|ping|dm|tell)\s+(?:me\s+)?(?:for\s+|when\s+|if\s+)?(.+?)(?:\s+under\s+|\s*<\s*|\s+max\s+)?(\d+)?$/i,
@@ -759,6 +803,15 @@ async function handleMessage(message, content) {
       case 'copium':
         await handleCopium(message, user);
         break;
+      
+      // === MULTI-SITE SEARCH ===
+      case 'search_site':
+        await handleSearchSite(message, user, parsed.site, parsed.query, parsed.maxPrice);
+        break;
+        
+      case 'search_all':
+        await handleSearchAll(message, user, parsed.query, parsed.maxPrice);
+        break;
         
       default:
         if (!message.guild) { // DM
@@ -847,6 +900,194 @@ async function handleSearch(message, user, query, maxPrice) {
   if (result.items.length > 5) {
     await message.channel.send(`*...and ${result.items.length - 5} more! Say \`watch ${sanitizeForDisplay(cleanQuery)}\` to get alerts~*`);
   }
+}
+
+// =====================================
+// 🌐 MULTI-SITE SEARCH HANDLERS
+// =====================================
+async function handleSearchSite(message, user, siteKey, query, maxPrice) {
+  const site = SITES[siteKey];
+  if (!site) {
+    await message.reply(`🤔 Unknown site! Try: \`mercari rem\`, \`solaris miku\`, or \`amiami power\``);
+    return;
+  }
+  
+  const cleanQuery = sanitizeQuery(query);
+  if (!cleanQuery) {
+    await message.reply(`🤔 What should I search on ${site.name}? Try: \`${siteKey} rem figures\``);
+    return;
+  }
+  
+  const cleanPrice = sanitizePrice(maxPrice);
+  
+  // Rate limit
+  if (!checkRateLimit(user.discord_id)) {
+    await message.reply("⏳ Slow down! Too many searches. Try again in a minute~");
+    return;
+  }
+  
+  // Send searching message
+  const searchMsg = `${site.emoji} Searching **${site.name}** for **${sanitizeForDisplay(cleanQuery)}**...`;
+  const statusMsg = await message.reply(searchMsg);
+  
+  // Search
+  const result = await searchSite(siteKey, cleanQuery, cleanPrice);
+  db.incrementSearchCount(user.id);
+  
+  if (!result.success) {
+    await statusMsg.edit(searchMsg + `\n\n💀 ${site.name} search failed... Try again?`);
+    return;
+  }
+  
+  if (!result.items || result.items.length === 0) {
+    await statusMsg.edit(searchMsg + `\n\n😢 No results on ${site.name}! Try a different search.`);
+    return;
+  }
+  
+  // Store for gacha/roast
+  lastSearchResults.set(user.discord_id, { query: cleanQuery, items: result.items, timestamp: Date.now() });
+  
+  // Log
+  db.logSearch(user.id, `${siteKey}:${cleanQuery}`, result.items.length);
+  
+  // Build summary
+  const currency = site.currency === 'USD' ? '$' : '¥';
+  const avgPrice = result.items.reduce((sum, i) => sum + (parseInt(i.price) || 0), 0) / result.items.length;
+  
+  const summaryEmbed = new EmbedBuilder()
+    .setColor(siteKey === 'mercari' ? 0xE53935 : siteKey === 'solaris' ? 0xFFA726 : 0x6C5CE7)
+    .setTitle(`${site.emoji} ${site.name} Results`)
+    .setDescription(`Found **${result.items.length}** results for **${sanitizeForDisplay(cleanQuery)}**\n\nAverage price: **${currency}${Math.round(avgPrice).toLocaleString()}**`);
+  
+  await statusMsg.edit({ content: null, embeds: [summaryEmbed] });
+  
+  // Show items
+  const toShow = result.items.slice(0, 5);
+  for (const item of toShow) {
+    const embed = createSiteEmbed(item, site);
+    await message.channel.send({ embeds: [embed] });
+  }
+  
+  if (result.items.length > 5) {
+    await message.channel.send(`*...and ${result.items.length - 5} more on ${site.name}!*`);
+  }
+}
+
+async function handleSearchAll(message, user, query, maxPrice) {
+  const cleanQuery = sanitizeQuery(query);
+  if (!cleanQuery) {
+    await message.reply("🤔 What should I search? Try: `all rem figures`");
+    return;
+  }
+  
+  const cleanPrice = sanitizePrice(maxPrice);
+  
+  // Rate limit
+  if (!checkRateLimit(user.discord_id)) {
+    await message.reply("⏳ Slow down! Too many searches. Try again in a minute~");
+    return;
+  }
+  
+  // Send searching message
+  const siteList = Object.values(SITES).map(s => s.emoji).join(' ');
+  const searchMsg = `🌐 Searching **ALL SITES** for **${sanitizeForDisplay(cleanQuery)}**...\n${siteList}`;
+  const statusMsg = await message.reply(searchMsg);
+  
+  // Search all sites in parallel
+  const result = await searchAllSites(cleanQuery, cleanPrice);
+  db.incrementSearchCount(user.id);
+  
+  if (!result.success || !result.items || result.items.length === 0) {
+    await statusMsg.edit(searchMsg + `\n\n😢 No results found on any site!`);
+    return;
+  }
+  
+  // Store for gacha/roast
+  lastSearchResults.set(user.discord_id, { query: cleanQuery, items: result.items, timestamp: Date.now() });
+  
+  // Log
+  db.logSearch(user.id, `all:${cleanQuery}`, result.items.length);
+  
+  // Count by site
+  const siteCounts = {};
+  result.items.forEach(item => {
+    siteCounts[item.site] = (siteCounts[item.site] || 0) + 1;
+  });
+  
+  // Build summary
+  let siteBreakdown = Object.entries(siteCounts)
+    .map(([site, count]) => `${SITES[site]?.emoji || '📦'} ${SITES[site]?.name || site}: ${count}`)
+    .join('\n');
+  
+  const summaryEmbed = new EmbedBuilder()
+    .setColor(0x9B59B6)
+    .setTitle(`🌐 Multi-Site Results`)
+    .setDescription(`Found **${result.items.length}** total results for **${sanitizeForDisplay(cleanQuery)}**\n\n${siteBreakdown}`)
+    .setFooter({ text: 'Sorted by rarity score' });
+  
+  await statusMsg.edit({ content: null, embeds: [summaryEmbed] });
+  
+  // Show top items (mixed from all sites)
+  const toShow = result.items.slice(0, 6);
+  for (const item of toShow) {
+    const site = SITES[item.site] || { emoji: '📦', name: 'Unknown', currency: 'JPY' };
+    const embed = createSiteEmbed(item, site);
+    await message.channel.send({ embeds: [embed] });
+  }
+  
+  if (result.items.length > 6) {
+    await message.channel.send(`*...and ${result.items.length - 6} more across all sites!*`);
+  }
+}
+
+// Create embed for site-specific results
+function createSiteEmbed(item, site) {
+  const price = parseInt(item.price) || 0;
+  const currency = site.currency === 'USD' ? '$' : '¥';
+  const rarity = item.rarity?.tier || 'r';
+  
+  const rarityColors = {
+    ssr: 0xFFD700,
+    sr: 0xA855F7,
+    r: 0x3B82F6,
+    salt: 0x6B7280,
+  };
+  
+  const embed = new EmbedBuilder()
+    .setColor(rarityColors[rarity] || 0x6C5CE7)
+    .setTitle(`${(item.name || item.raw_title || 'Figure').slice(0, 250)}`)
+    .setURL(item.url || site.searchUrl(''));
+  
+  if (item.image) {
+    embed.setThumbnail(item.image);
+  }
+  
+  let desc = `${site.emoji} **${site.name}**\n\n`;
+  desc += `💰 **${currency}${price.toLocaleString()}**\n`;
+  
+  // Condition (varies by site)
+  if (item.item_grade && item.box_grade) {
+    desc += `✨ Figure: **${item.item_grade}** | 📦 Box: **${item.box_grade}**\n`;
+  } else if (item.condition) {
+    desc += `✨ Condition: **${item.condition}**\n`;
+  }
+  
+  // Seller (Mercari)
+  if (item.seller) {
+    desc += `👤 Seller: ${item.seller}\n`;
+  }
+  
+  // Manufacturer
+  if (item.manufacturer) {
+    desc += `🏭 ${item.manufacturer}\n`;
+  }
+  
+  desc += `${item.in_stock !== false ? '✅ Available' : '❌ Sold Out'}`;
+  
+  embed.setDescription(desc);
+  embed.setFooter({ text: `${site.emoji} ${site.name} • Click title to buy!` });
+  
+  return embed;
 }
 
 async function handleWatch(message, user, query, maxPrice) {
