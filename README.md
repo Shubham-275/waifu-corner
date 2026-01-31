@@ -149,19 +149,6 @@ Bot:  🎧 Super Sonico! The OG thicc queen since 2006~
 | `stop watching rem` | Removes from watchlist |
 | `stats` | Your hunting statistics |
 | `help` | Shows all commands |
-
----
-
-## 💰 Cost Breakdown
-
-| Service | Cost |
-|---------|------|
-| Railway | ~$1-2/month |
-| Discord Bot | Free |
-| Mino API | Pay per use |
-
-**Your $4 Railway credit = 2-3 months of hosting!**
-
 ---
 
 ## 🔒 Security Features
