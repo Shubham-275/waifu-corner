@@ -33,7 +33,7 @@ const CONFIG = {
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
   MINO_API_KEY: process.env.MINO_API_KEY,
   MINO_ENDPOINT: 'https://mino.ai/v1/automation/run-sse',
-  WATCH_INTERVAL: 5 * 60 * 1000, // 5 minutes
+  WATCH_INTERVAL: 24 * 60 * 60 * 1000, // Once per day
   RATE_LIMIT_WINDOW: 60000,      // 1 minute
   RATE_LIMIT_MAX: 10,            // 10 searches per minute
   MAX_WATCHES_PER_USER: 20,
@@ -1557,6 +1557,36 @@ client.on('messageCreate', async (message) => {
     
     const isDM = !message.guild;
     const isMentioned = message.mentions.has(client.user);
+    
+    // Ignore messages that aren't meant for the bot
+    const content = message.content.toLowerCase();
+    const ignorePatterns = [
+      '@here',
+      '@everyone',
+      'http://',
+      'https://',
+      'discord.gg/',
+      'is live',
+      'going live',
+      'now live',
+      'check out',
+      'check this',
+      'look at this',
+      'posted',
+      'just posted',
+      'new post',
+      'link in',
+      'join us',
+      'join my',
+      'subscribe',
+      'follow me',
+      'giveaway',
+      'announcement',
+    ];
+    
+    if (ignorePatterns.some(pattern => content.includes(pattern))) {
+      return;
+    }
     
     // Debug logging
     console.log(`📨 Message from ${message.author.username}: "${message.content.slice(0, 50)}" (DM: ${isDM})`);
